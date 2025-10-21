@@ -1,0 +1,66 @@
+plugins {
+    id 'java-library'
+    id 'de.undercouch.download' version '5.4.0'
+}
+
+ext {
+    postgresqlVersion = '42.7.6'
+    confluentVersion = '7.8.2'
+}
+
+repositories {
+    mavenCentral()
+    maven { url 'https://packages.confluent.io/maven/' }
+    maven { url 'https://repository.mulesoft.org/nexus/content/repositories/public/' }
+}
+
+configurations {
+    jdbcDrivers
+    confluentComponents
+}
+
+dependencies {
+    // JDBC drivers
+    jdbcDrivers "org.postgresql:postgresql:${postgresqlVersion}"
+
+    // Confluent components that can be managed via Maven
+    confluentComponents "io.confluent:kafka-connect-jdbc:${confluentVersion}"
+    confluentComponents "io.confluent:kafka-connect-avro-converter:${confluentVersion}"
+}
+
+// Copy JDBC drivers to connect lib
+task copyJdbcDrivers(type: Copy) {
+    from configurations.jdbcDrivers
+    into 'connect-lib'
+    rename { filename ->
+        // Keep original JAR names for compatibility
+        filename
+    }
+}
+
+// Copy any additional JAR files (like custom converters)
+task copyCustomJars(type: Copy) {
+    from fileTree('.') {
+        include '*.jar'
+        exclude 'build/**'
+    }
+    into 'custom-jars'
+}
+
+// Main task to prepare all dependencies
+task prepareConnectDependencies(dependsOn: [
+    copyJdbcDrivers,
+    copyCustomJars
+]) {
+    doLast {
+        println "All Kafka Connect dependencies prepared:"
+        println "- JDBC drivers: ${fileTree('connect-lib').files.size()} files"
+        println "- Debezium connectors: ${fileTree('debezium-connectors').files.size()} files"
+        println "- Custom JARs: ${fileTree('custom-jars').files.size()} files"
+    }
+}
+
+// Clean task to remove generated directories
+task cleanConnectDependencies(type: Delete) {
+    delete 'connect-lib', 'custom-jars'
+}

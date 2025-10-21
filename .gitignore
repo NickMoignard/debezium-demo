@@ -1,0 +1,4 @@
+.postgres-source
+.postgres-target
+data
+.minio_data

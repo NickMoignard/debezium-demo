@@ -1,0 +1,135 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Source Database
+  postgres-source:
+    networks:
+      - default
+    image: debezium/postgres:17-alpine
+    container_name: postgres-source
+    environment:
+      POSTGRES_DB: sourcedb
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./.postgres-source:/var/lib/postgresql/data
+    command: ["postgres", "-c", "wal_level=logical"]
+
+  # PostgreSQL Target Database
+  postgres-target:
+    networks:
+      - default
+    image: debezium/postgres:17-alpine
+    container_name: postgres-target
+    environment:
+      POSTGRES_DB: targetdb
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5433:5432"
+    volumes:
+      - ./.postgres-target:/var/lib/postgresql/data
+
+  kafka:
+    networks:
+      - default
+    image: confluentinc/cp-kafka:latest
+    hostname: kafka
+    container_name: kafka
+    ports:
+      - "9092:9092"
+      - "9093:9093"
+    environment:
+      KAFKA_KRAFT_MODE: "true"
+      KAFKA_PROCESS_ROLES: controller,broker
+      KAFKA_NODE_ID: 1
+      KAFKA_CONTROLLER_QUORUM_VOTERS: "1@kafka:9093"
+      # Added INTERNAL listener for container-to-container communication
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093,INTERNAL://0.0.0.0:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT,INTERNAL:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      # Added both external (localhost:9092) and internal (kafka:29092) advertised listeners
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092,INTERNAL://kafka:29092
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_LOG_RETENTION_HOURS: 168
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      CLUSTER_ID: "Mk3OEYBSD34fcwNTJENDM2Qk"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./data:/var/lib/kafka/data
+
+  # Schema Registry
+  schema-registry:
+    networks:
+      - default
+    image: confluentinc/cp-schema-registry:7.4.0
+    container_name: schema-registry
+    depends_on:
+      - kafka
+    ports:
+      - "8081:8081"
+    environment:
+      SCHEMA_REGISTRY_HOST_NAME: schema-registry
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: kafka:29092  # Changed to use INTERNAL listener
+
+  # Kafka Connect
+  kafka-connect:
+    image: custom-kafka-connect:latest
+    container_name: kafka-connect
+    depends_on:
+      - kafka
+      - schema-registry
+      - postgres-source
+      - postgres-target
+    ports:
+      - "8083:8083"
+    networks:
+      - default
+    environment:
+      BOOTSTRAP_SERVERS: kafka:29092  # Using INTERNAL listener
+      GROUP_ID: connect-cluster
+      CONFIG_STORAGE_TOPIC: docker-connect-configs
+      OFFSET_STORAGE_TOPIC: docker-connect-offsets
+      STATUS_STORAGE_TOPIC: docker-connect-status
+      CONFIG_STORAGE_REPLICATION_FACTOR: 1
+      OFFSET_STORAGE_REPLICATION_FACTOR: 1
+      STATUS_STORAGE_REPLICATION_FACTOR: 1
+      KEY_CONVERTER: io.confluent.connect.avro.AvroConverter
+      VALUE_CONVERTER: io.confluent.connect.avro.AvroConverter
+      CONNECT_KEY_CONVERTER_SCHEMA_REGISTRY_URL: http://schema-registry:8081
+      CONNECT_VALUE_CONVERTER_SCHEMA_REGISTRY_URL: http://schema-registry:8081
+      CONNECT_PLUGIN_PATH: /usr/share/java,/usr/share/confluent-hub-components,/usr/share/confluent-hub/lib,/kafka/connect,/usr/share/kafka-connect/plugins
+
+  minio:
+    networks:
+      - default
+    image: minio/minio
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      - MINIO_ROOT_USER=minioadmin
+      - MINIO_ROOT_PASSWORD=minioadmin
+      - MINIO_DEFAULT_BUCKETS=example-bucket
+    command: server /data --console-address ":9001" --address ":9000"
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:9000/minio/health/live" ]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+    volumes:
+      - minio_data:/data
+
+networks:
+  default:
+    driver: bridge
+
+volumes:
+  postgres-source-data:
+  postgres-target-data:
+  minio_data:
