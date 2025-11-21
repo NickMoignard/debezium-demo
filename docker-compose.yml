@@ -99,6 +99,11 @@ services:
       CONFIG_STORAGE_REPLICATION_FACTOR: 1
       OFFSET_STORAGE_REPLICATION_FACTOR: 1
       STATUS_STORAGE_REPLICATION_FACTOR: 1
+      OFFSET_FLUSH_INTERVAL_MS: 10000
+      # Ensure compaction for internal topics
+      CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR: 1
+      CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR: 1
+      CONNECT_STATUS_STORAGE_REPLICATION_FACTOR: 1
       KEY_CONVERTER: io.confluent.connect.avro.AvroConverter
       VALUE_CONVERTER: io.confluent.connect.avro.AvroConverter
       CONNECT_KEY_CONVERTER_SCHEMA_REGISTRY_URL: http://schema-registry:8081
@@ -124,6 +129,24 @@ services:
       retries: 3
     volumes:
       - minio_data:/data
+
+  # Python Data Generator
+  data-generator:
+    build:
+      context: ./app
+      dockerfile: Dockerfile
+    container_name: data-generator
+    depends_on:
+      - postgres-source
+    networks:
+      - default
+    environment:
+      DB_HOST: postgres-source
+      DB_PORT: 5432
+      DB_NAME: sourcedb
+      DB_USER: postgres
+      DB_PASSWORD: postgres
+    restart: unless-stopped
 
 networks:
   default:

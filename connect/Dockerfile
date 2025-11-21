@@ -48,6 +48,12 @@ RUN confluent-hub install --no-prompt \
     --worker-configs /kafka/config/connect-distributed.properties \
     confluentinc/kafka-connect-avro-converter:latest
 
+# Install Databricks Delta Lake Connector
+RUN confluent-hub install --no-prompt \
+    --component-dir /usr/share/confluent-hub/lib \
+    --worker-configs /kafka/config/connect-distributed.properties \
+    confluentinc/kafka-connect-databricks-delta-lake:latest
+
 # Set proper permissions for the kafka user
 RUN chown -R kafka:kafka /usr/share/confluent-hub/lib \
                         /usr/share/confluent-hub-components \
