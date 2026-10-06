@@ -4,7 +4,8 @@
 #   cdc.{region}.{table}   regional Debezium topics, created up front so the
 #                          Streams app can start before the connector snapshots
 #   edm.{entity}           entity topic, time-based delete retention
-#   edm.{entity}.quarantine  DQ rejects, time-based delete retention
+#   edm.{entity}.quarantine  changes that failed checks, time-based delete
+#                            retention
 #
 # Kafka is transport only (ADR 0001), so nothing here is compacted. The EDM
 # store and quarantine in Postgres hold the durable copies. Safe to rerun:
