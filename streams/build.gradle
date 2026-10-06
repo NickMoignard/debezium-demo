@@ -1,0 +1,42 @@
+plugins {
+    id 'application'
+}
+
+ext {
+    kafkaVersion = '4.3.1'
+    confluentVersion = '8.3.2'
+}
+
+repositories {
+    mavenCentral()
+    maven { url 'https://packages.confluent.io/maven/' }
+}
+
+// Kafka Streams 4.x needs 17; builds on any newer JDK, the Docker image runs 21
+tasks.withType(JavaCompile).configureEach {
+    options.release = 17
+}
+
+dependencies {
+    implementation "org.apache.kafka:kafka-streams:${kafkaVersion}"
+    implementation "io.confluent:kafka-streams-avro-serde:${confluentVersion}"
+    // Unversioned: the Jackson BOM pulled in by the Confluent serde picks the version
+    implementation 'com.fasterxml.jackson.dataformat:jackson-dataformat-yaml'
+    implementation 'com.fasterxml.jackson.core:jackson-databind'
+    runtimeOnly 'org.slf4j:slf4j-simple:2.0.17'
+
+    testImplementation "org.apache.kafka:kafka-streams-test-utils:${kafkaVersion}"
+    testImplementation platform('org.junit:junit-bom:5.13.4')
+    testImplementation 'org.junit.jupiter:junit-jupiter'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+    testImplementation 'org.assertj:assertj-core:3.27.6'
+}
+
+application {
+    mainClass = 'demo.integrate.App'
+}
+
+test {
+    useJUnitPlatform()
+    testLogging { events 'failed'; exceptionFormat 'full' }
+}

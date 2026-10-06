@@ -7,16 +7,17 @@ This is a demo project for educational purposes. Specifically testing various Ka
 ## 🏗️ Architecture
 
 ```
-Python Data Generator → PostgreSQL Source → Debezium → Kafka → Schema Registry → Sinks
+Python Data Generator → PostgreSQL Source → Debezium → cdc.{au,uk,us}.* → Kafka Streams → edm.*
 ```
 
 **Components:**
-- **PostgreSQL (Source & Target)**: Source database with logical replication enabled
-- **Debezium**: CDC connector capturing database changes
+- **PostgreSQL (Source & Target)**: Source database with logical replication enabled. Each region is a schema (`au`, `uk`, `us`, `eu`, `ca`) standing in for a separate regional database
+- **Debezium**: CDC connector capturing the `au`, `uk` and `us` schemas
 - **Kafka (KRaft mode)**: Event streaming platform
 - **Schema Registry**: Avro schema management
+- **Kafka Streams** (`streams/`): unions the three regional topics per table into one integrated topic per entity. See [streams/README.md](streams/README.md)
 - **MinIO**: S3-compatible object storage for staging
-- **Python Data Generator**: Continuously generates fake products and sales data
+- **Python Data Generator** (`app_multi_region/`): products, users, orders and line items per region, with order status updates, occasional deletes and some deliberately bad rows
 
 ## 🚀 Quick Start
 
@@ -46,9 +47,12 @@ curl http://localhost:8081/subjects
 docker compose logs -f data-generator
 ```
 
-### 3. Create Debezium CDC Connector
+### 3. Create Topics and the Debezium CDC Connector
 
 ```bash
+# Regional cdc.* topics and integrated edm.* topics
+./scripts/create-integrated-topics.sh
+
 # Create the connector (first time)
 ./scripts/create-connector.sh
 
@@ -59,42 +63,40 @@ docker compose logs -f data-generator
 ./scripts/reset-demo.sh
 ```
 
-### 4. Verify CDC Pipeline
+### 4. Verify the Pipeline
 
 ```bash
 # Check connector status
 curl http://localhost:8083/connectors/debezium-postgres-source/status | jq '.'
 
-# List Kafka topics (should see cdc.public.products and cdc.public.sales)
+# List Kafka topics (cdc.au.orders, cdc.uk.orders, ... and edm.order, edm.order.quarantine, ...)
 docker exec kafka kafka-topics --list --bootstrap-server localhost:9092
 
-# Consume CDC events from products table
-docker exec kafka kafka-console-consumer \
-  --bootstrap-server localhost:9092 \
-  --topic cdc.public.products \
-  --from-beginning
+# Raw CDC events from one region
+docker exec schema-registry kafka-avro-console-consumer \
+  --bootstrap-server kafka:29092 --topic cdc.au.orders --from-beginning \
+  --property schema.registry.url=http://localhost:8081 2>/dev/null | grep '^{'
 
-# Consume CDC events from sales table
-docker exec kafka kafka-console-consumer \
-  --bootstrap-server localhost:9092 \
-  --topic cdc.public.sales \
-  --from-beginning
+# The same entity integrated across all three regions
+docker exec schema-registry kafka-avro-console-consumer \
+  --bootstrap-server kafka:29092 --topic edm.order --from-beginning \
+  --property schema.registry.url=http://localhost:8081 2>/dev/null | grep '^{'
 ```
 
 ## 📊 Data Flow
 
-1. **Python Data Generator** inserts 1-2 records/second into `products` and `sales` tables
+1. **Python Data Generator** places 1-2 orders per second per region, with line items, and moves existing orders through `pending → paid → shipped → delivered` (or `cancelled`)
 2. **PostgreSQL** commits transactions and writes to WAL (Write-Ahead Log)
-3. **Debezium** reads from WAL via logical replication slot
-4. **Kafka** receives CDC events as Avro-encoded messages
-5. **Schema Registry** stores and versions the Avro schemas
-6. **Consumers** can subscribe to topics for downstream processing
+3. **Debezium** reads from WAL via logical replication slot and writes one topic per region and table, `cdc.{region}.{table}`, keeping the full change envelope
+4. **Schema Registry** stores and versions the Avro schemas
+5. **Kafka Streams** merges the regional topics, stamps region and currency, renames and retypes columns, applies DQ expectations and writes `edm.{entity}` (compacted) and `edm.{entity}.quarantine`
 
 ## 🗄️ Database Schema
 
-### Products Table
+Every region schema has the same four tables:
+
 ```sql
-CREATE TABLE products (
+CREATE TABLE {region}.products (
     id SERIAL PRIMARY KEY,
     name VARCHAR(255) NOT NULL,
     category VARCHAR(100),
@@ -102,20 +104,44 @@ CREATE TABLE products (
     stock_quantity INTEGER,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
-```
 
-### Sales Table
-```sql
-CREATE TABLE sales (
+CREATE TABLE {region}.users (
+    id SERIAL PRIMARY KEY,
+    first_name VARCHAR(255) NOT NULL,
+    last_name VARCHAR(255) NOT NULL,
+    email VARCHAR(255) NOT NULL,
+    phone_number VARCHAR(20),
+    address_line_one VARCHAR(255),
+    address_line_two VARCHAR(255),
+    city VARCHAR(100),
+    state VARCHAR(100),
+    postal_code VARCHAR(20),
+    country VARCHAR(100),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE {region}.orders (
+    id SERIAL PRIMARY KEY,
+    user_id INTEGER,
+    order_status VARCHAR(50),
+    promo_code VARCHAR(50),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE {region}.line_items (
     id SERIAL PRIMARY KEY,
     product_id INTEGER,
-    customer_name VARCHAR(255),
-    customer_email VARCHAR(255),
+    order_id INTEGER,
     quantity INTEGER,
-    total_amount NUMERIC(10, 2),
-    sale_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    line_item_discount NUMERIC(10, 2),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 ```
+
+All tables use `REPLICA IDENTITY FULL`, so updates and deletes carry the before image.
 
 ## 🔧 Configuration
 
@@ -124,27 +150,33 @@ CREATE TABLE sales (
 Edit `debezium-connector.json` to customize:
 - **Tables to capture**: `table.include.list`
 - **Topic prefix**: `topic.prefix`
-- **Transformations**: `transforms.*` settings
 - **Serialization**: Key/value converter settings
 
 Key configuration highlights:
 ```json
 {
-  "table.include.list": "public.products,public.sales",
+  "topic.prefix": "cdc",
+  "table.include.list": "au\\.(products|users|orders|line_items),uk\\.(...),us\\.(...)",
   "plugin.name": "pgoutput",
-  "transforms": "unwrap",
-  "transforms.unwrap.type": "io.debezium.transforms.ExtractNewRecordState"
+  "decimal.handling.mode": "precise"
 }
 ```
 
+There is no `ExtractNewRecordState` unwrap. The regional topics keep the full Debezium envelope, like a Raw layer, and the Streams app does the unwrap.
+
 ### Environment Variables
 
-**Data Generator** (`app/`):
+**Data Generator** (`app_multi_region/`):
 - `DB_HOST`: PostgreSQL hostname (default: `postgres-source`)
 - `DB_PORT`: PostgreSQL port (default: `5432`)
 - `DB_NAME`: Database name (default: `sourcedb`)
 - `DB_USER`: Database user (default: `postgres`)
 - `DB_PASSWORD`: Database password (default: `postgres`)
+- `BAD_DATA_RATE`: share of rows that deliberately fail a DQ expectation (default: `0.02`)
+- `DELETE_RATE`: chance per region per second of deleting a cancelled order (default: `0.05`)
+
+**Streams app** (`streams/`):
+- `BOOTSTRAP_SERVERS`, `SCHEMA_REGISTRY_URL`, `APPLICATION_ID`, `CONFIG_DIR`
 
 **Kafka Network**:
 - Host access: `localhost:9092`
@@ -289,7 +321,7 @@ curl -X POST http://localhost:8083/connectors/debezium-postgres-source/restart
 curl http://localhost:8081/subjects | jq '.'
 
 # Get specific schema
-curl http://localhost:8081/subjects/cdc.public.products-value/versions/latest | jq '.'
+curl http://localhost:8081/subjects/edm.order-value/versions/latest | jq '.'
 ```
 
 ## 🐛 Troubleshooting

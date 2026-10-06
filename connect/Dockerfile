@@ -42,11 +42,11 @@ RUN wget http://client.hub.confluent.io/confluent-hub-client-latest.tar.gz \
 # RUN chmod +x /usr/share/confluent-hub/bin/confluent-hub && \
 #     ln -sf /usr/share/confluent-hub/bin/confluent-hub /usr/local/bin/confluent-hub
 
-# Install Confluent components
+# Install Confluent components. Pinned: 8.x converters need Kafka 4 clients, this worker runs 3.9
 RUN confluent-hub install --no-prompt \
     --component-dir /usr/share/confluent-hub/lib \
     --worker-configs /kafka/config/connect-distributed.properties \
-    confluentinc/kafka-connect-avro-converter:latest
+    confluentinc/kafka-connect-avro-converter:7.8.2
 
 # Install Databricks Delta Lake Connector
 RUN confluent-hub install --no-prompt \

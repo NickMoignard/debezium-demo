@@ -2,3 +2,4 @@
 .postgres-target
 data
 .minio_data
+__pycache__/
