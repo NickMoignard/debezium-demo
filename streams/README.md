@@ -7,7 +7,7 @@ Databricks.
 
 ```
 cdc.au.orders ─┐
-cdc.uk.orders ─┼─ merge ─ key: sha256(order:{region}:{id}) ─ unwrap, rename, retype, DQ ─┬─ edm.order             (compacted)
+cdc.uk.orders ─┼─ merge ─ key: sha256(order:{region}:{id}) ─ unwrap, rename, retype, DQ ─┬─ edm.order
 cdc.us.orders ─┘                                                                         └─ edm.order.quarantine
 ```
 
@@ -84,7 +84,7 @@ would fail DQ today.
 | Region registry stamps `jurisdiction_code`, `currency_code` | `regions.yaml`, captured in the per-region stream at build time |
 | `sha2(concat_ws(':', entity, region, id), 256)` keys (D12) | `Keys.entityKey`, the same formula |
 | DLT expectations + quarantine table | `split()` into the entity topic and a quarantine topic |
-| `AUTO CDC ... SCD TYPE 1`, sequenced by `_lsn` | compacted topic keyed by the entity hash. The latest record per key is the current state |
+| `AUTO CDC ... SCD TYPE 1`, sequenced by `_lsn` | not done in Kafka. The entity topic carries every version keyed by the entity hash, and the EDM store (Postgres) upserts on `_entity_key` to hold current state |
 | Contract tests for schema drift | missing column goes to quarantine; output schema lives in Schema Registry |
 
 The ordering argument is the one `prep_edm/CONTEXT.md` makes for `sequence_by = lsn`. Each source key
@@ -94,12 +94,14 @@ Every step is stateless. Processing runs with `exactly_once_v2`.
 
 ## Where this is weaker than DLT
 
-I think the union, typing and DQ steps are a better fit here than in DLT. They are row-level, they
-run in milliseconds, and the integrated topics are reusable by anything that reads Kafka, not only
-Databricks. A few things don't come for free, though:
+I think the union, typing and DQ steps are a better fit here than in DLT. They are row-level and
+run in milliseconds. A few things don't come for free, though:
 
-- Compaction gives you SCD1 eventually, not at read time. A consumer reading the topic sees every
-  version until the cleaner runs. Loading it into Delta still needs a MERGE or AUTO CDC on `_entity_key`.
+- Kafka is transport, not storage ([ADR 0001](../docs/adr/0001-kafka-is-transport-not-storage.md)).
+  Entity topics keep 7 days of changes, not the current state of every entity. Current state lives in
+  the EDM store, and a consumer that needs it reads there or applies the changes itself with an
+  upsert on `_entity_key`. Losing the EDM store means rebuilding from the raw layer or a Debezium
+  re-snapshot, not replaying a topic.
 - SCD2 (`user_history`, `market_history`) would need a state store and is not attempted.
 - Ordering is only guaranteed per key. That is fine for AUTO CDC downstream, which sequences per
   key anyway.

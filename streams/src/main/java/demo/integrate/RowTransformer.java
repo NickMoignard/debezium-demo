@@ -45,7 +45,7 @@ public final class RowTransformer {
 
     public Outcome apply(CdcEvent event) {
         if (event.envelope() == null) {
-            // Debezium's post-delete tombstone. Forward it so compaction drops the key.
+            // Debezium's post-delete tombstone. Forward it so consumers delete the key.
             return event.sourceId() == null ? Outcome.drop() : Outcome.tombstone();
         }
 

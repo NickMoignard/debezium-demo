@@ -50,7 +50,7 @@ docker compose logs -f data-generator
 ### 3. Create Topics and the Debezium CDC Connector
 
 ```bash
-# Regional cdc.* topics and integrated edm.* topics
+# Regional cdc.* topics and integrated edm.* topics (safe to rerun)
 ./scripts/create-integrated-topics.sh
 
 # Create the connector (first time)
@@ -61,6 +61,13 @@ docker compose logs -f data-generator
 
 # Reset demo environment completely
 ./scripts/reset-demo.sh
+```
+
+Entity topics use time-based `delete` retention (7 days), not compaction. Kafka is transport only; the durable copies live in Postgres ([ADR 0001](docs/adr/0001-kafka-is-transport-not-storage.md)). Entity topics created compacted by an older version of the topic script switch over when you rerun it, with no reset. To check one:
+
+```bash
+docker exec kafka kafka-configs --bootstrap-server localhost:9092 \
+  --describe --entity-type topics --entity-name edm.order
 ```
 
 ### 4. Verify the Pipeline
@@ -89,7 +96,7 @@ docker exec schema-registry kafka-avro-console-consumer \
 2. **PostgreSQL** commits transactions and writes to WAL (Write-Ahead Log)
 3. **Debezium** reads from WAL via logical replication slot and writes one topic per region and table, `cdc.{region}.{table}`, keeping the full change envelope
 4. **Schema Registry** stores and versions the Avro schemas
-5. **Kafka Streams** merges the regional topics, stamps region and currency, renames and retypes columns, applies DQ expectations and writes `edm.{entity}` (compacted) and `edm.{entity}.quarantine`
+5. **Kafka Streams** merges the regional topics, stamps region and currency, renames and retypes columns, applies DQ expectations and writes `edm.{entity}` and `edm.{entity}.quarantine`, both on 7-day delete retention
 
 ## 🗄️ Database Schema
 

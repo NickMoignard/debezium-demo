@@ -54,7 +54,7 @@ public final class IntegrationTopology {
                             Branched.withConsumer(s -> s.mapValues(Outcome::record).to(spec.quarantineTopic(), produced), "quarantine"))
                     .branch((key, out) -> out.route() == Outcome.Route.DROP,
                             Branched.withConsumer(s -> { }, "drop"))
-                    // VALID and TOMBSTONE; a tombstone's record is null, which is what compaction wants
+                    // VALID and TOMBSTONE; a tombstone's record is null, which tells consumers to delete the key
                     .defaultBranch(Branched.withConsumer(s -> s.mapValues(Outcome::record).to(spec.edmTopic(), produced), "edm"));
         }
         return builder.build();
