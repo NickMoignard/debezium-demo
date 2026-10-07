@@ -30,6 +30,8 @@ From the repo root:
 docker compose up -d --build
 ./scripts/create-integrated-topics.sh   # before the app starts consuming, see below
 ./scripts/create-connector.sh
+./scripts/create-target-schemas.sh      # these two land entity topics in the EDM store
+./scripts/create-sink-connectors.sh
 docker compose logs -f streams-app
 ```
 

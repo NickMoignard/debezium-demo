@@ -42,14 +42,35 @@ else
 fi
 echo ""
 
-# 3. Drop PostgreSQL tables
+# 3. Delete sink connectors (EDM sink, quarantine sink)
+print_step "Deleting sink connectors..."
+SINKS=$(curl -s "http://localhost:8083/connectors?expand=info" 2>/dev/null | jq -r 'to_entries[] | select(.value.info.type == "sink") | .key' 2>/dev/null || true)
+if [ -n "$SINKS" ]; then
+    while IFS= read -r sink; do
+        echo "  Deleting connector: $sink"
+        curl -s -X DELETE "http://localhost:8083/connectors/$sink"
+    done <<< "$SINKS"
+    print_success "Sink connectors deleted"
+else
+    print_success "No sink connectors to delete"
+fi
+echo ""
+
+# 4. Drop the EDM store and quarantine schemas in the Target Postgres database
+print_step "Dropping target schemas..."
+docker exec postgres-target psql -U postgres -d targetdb -c "DROP SCHEMA IF EXISTS edm CASCADE;" 2>/dev/null || true
+docker exec postgres-target psql -U postgres -d targetdb -c "DROP SCHEMA IF EXISTS quarantine CASCADE;" 2>/dev/null || true
+print_success "Schemas edm and quarantine dropped"
+echo ""
+
+# 5. Drop PostgreSQL tables
 print_step "Dropping PostgreSQL tables..."
 docker exec postgres-source psql -U postgres -d sourcedb -c "DROP TABLE IF EXISTS products CASCADE;" 2>/dev/null || true
 docker exec postgres-source psql -U postgres -d sourcedb -c "DROP TABLE IF EXISTS sales CASCADE;" 2>/dev/null || true
 print_success "Tables dropped"
 echo ""
 
-# 4. Drop replication slots
+# 6. Drop replication slots
 print_step "Dropping replication slots..."
 SLOTS=$(docker exec postgres-source psql -U postgres -d sourcedb -t -c "SELECT slot_name FROM pg_replication_slots;" 2>/dev/null | grep -v '^$' || true)
 if [ -n "$SLOTS" ]; then
@@ -66,7 +87,7 @@ else
 fi
 echo ""
 
-# 5. Drop publications
+# 7. Drop publications
 print_step "Dropping publications..."
 PUBS=$(docker exec postgres-source psql -U postgres -d sourcedb -t -c "SELECT pubname FROM pg_publication;" 2>/dev/null | grep -v '^$' || true)
 if [ -n "$PUBS" ]; then
@@ -83,7 +104,7 @@ else
 fi
 echo ""
 
-# 6. Delete Kafka topics
+# 8. Delete Kafka topics
 print_step "Deleting Kafka topics..."
 TOPICS=$(docker exec kafka kafka-topics --bootstrap-server localhost:9092 --list 2>/dev/null | grep -E '^cdc\.|^dbserver1\.|^docker-connect|^debezium-signal$' || true)
 if [ -n "$TOPICS" ]; then
@@ -99,7 +120,7 @@ else
 fi
 echo ""
 
-# 7. Delete Schema Registry schemas
+# 9. Delete Schema Registry schemas
 print_step "Deleting Schema Registry schemas..."
 SUBJECTS=$(curl -s http://localhost:8081/subjects 2>/dev/null || echo "[]")
 if [ "$SUBJECTS" != "[]" ] && [ -n "$SUBJECTS" ]; then
@@ -115,7 +136,7 @@ else
 fi
 echo ""
 
-# 8. Reset Kafka Connect internal topics and Schema Registry data
+# 10. Reset Kafka Connect internal topics and Schema Registry data
 print_step "Resetting Kafka Connect and Schema Registry topics..."
 echo "  Stopping Kafka Connect and Schema Registry..."
 docker compose stop kafka-connect schema-registry
@@ -136,7 +157,7 @@ sleep 5
 print_success "Kafka Connect and Schema Registry topics deleted"
 echo ""
 
-# 9. Restart Schema Registry and Kafka Connect to recreate internal topics
+# 11. Restart Schema Registry and Kafka Connect to recreate internal topics
 print_step "Restarting Schema Registry and Kafka Connect..."
 docker compose up -d schema-registry
 echo "  Waiting for Schema Registry to initialize (10s)..."
@@ -149,7 +170,7 @@ sleep 30
 print_success "Services restarted with clean state"
 echo ""
 
-# 10. Create debezium-signal topic
+# 12. Create debezium-signal topic
 print_step "Creating debezium-signal topic..."
 docker exec kafka kafka-topics \
     --bootstrap-server localhost:9092 \
@@ -162,7 +183,7 @@ docker exec kafka kafka-topics \
 print_success "debezium-signal topic created (1 partition, 7 day retention)"
 echo ""
 
-# 11. Restart data generator
+# 13. Restart data generator
 print_step "Starting data generator..."
 docker compose up -d data-generator
 print_success "Data generator started"
@@ -174,3 +195,4 @@ echo "Next steps:"
 echo "  1. Verify Kafka Connect is ready: curl http://localhost:8083/ | jq '.'"
 echo "  2. Run ./create-connector.sh to recreate the Debezium connector"
 echo "  3. Verify with: curl http://localhost:8083/connectors/debezium-postgres-source/status | jq '.'"
+echo "  4. Run ./scripts/create-target-schemas.sh and ./scripts/create-sink-connectors.sh to recreate the EDM store"

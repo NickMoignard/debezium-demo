@@ -70,6 +70,18 @@ docker exec kafka kafka-configs --bootstrap-server localhost:9092 \
   --describe --entity-type topics --entity-name edm.order
 ```
 
+Then create the EDM sink, which writes entity topics into the EDM store in `targetdb`:
+
+```bash
+# edm and quarantine schemas in targetdb (safe to rerun)
+./scripts/create-target-schemas.sh
+
+# Create or update the sink connectors from their JSON configs (safe to rerun)
+./scripts/create-sink-connectors.sh
+```
+
+The EDM sink (`edm-sink-connector.json`) is a Debezium JDBC sink. It upserts each record on its entity key into `edm.{entity}` and deletes the row on a tombstone. It creates tables from the Schema Registry schema and adds columns when the schema gains a nullable field. Timestamps land as `timestamp` columns in UTC, truncated to milliseconds, and money as `numeric(19,4)`. It carries `edm.product` so far.
+
 ### 4. Verify the Pipeline
 
 ```bash
@@ -88,6 +100,11 @@ docker exec schema-registry kafka-avro-console-consumer \
 docker exec schema-registry kafka-avro-console-consumer \
   --bootstrap-server kafka:29092 --topic edm.order --from-beginning \
   --property schema.registry.url=http://localhost:8081 2>/dev/null | grep '^{'
+
+# EDM sink status, and products in the EDM store per region
+curl http://localhost:8083/connectors/edm-sink/status | jq '.'
+docker exec postgres-target psql -U postgres -d targetdb \
+  -c "SELECT jurisdiction_code, count(*) FROM edm.product GROUP BY 1 ORDER BY 1"
 ```
 
 ## 📊 Data Flow
@@ -404,11 +421,14 @@ docker compose logs schema-registry
 ├── scripts/                      # Utility scripts
 │   ├── create-connector.sh       # Create Debezium connector
 │   ├── update-connector.sh       # Update connector config
+│   ├── create-target-schemas.sh  # Create edm and quarantine schemas in targetdb
+│   ├── create-sink-connectors.sh # Create or update the sink connectors
 │   ├── reset-demo.sh             # Reset entire environment
 │   └── add-tables.sh             # Add tables with incremental snapshot
 ├── .github/
 │   └── copilot-instructions.md   # AI coding agent guidance
 ├── debezium-connector.json       # CDC connector configuration
+├── edm-sink-connector.json       # EDM sink connector configuration
 ├── example-connector-cfg.json    # Databricks sink reference
 ├── ADDING_TABLES.md              # Guide for incremental snapshots
 └── docker-compose.yml            # Full infrastructure definition
