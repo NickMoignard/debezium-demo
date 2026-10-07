@@ -70,7 +70,7 @@ docker exec kafka kafka-configs --bootstrap-server localhost:9092 \
   --describe --entity-type topics --entity-name edm.order
 ```
 
-Then create the EDM sink, which writes entity topics into the EDM store in `targetdb`:
+Then create the sinks. The EDM sink writes entity topics into the EDM store in `targetdb`, and the quarantine sink writes quarantine topics into the quarantine log:
 
 ```bash
 # edm and quarantine schemas in targetdb (safe to rerun)
@@ -81,6 +81,8 @@ Then create the EDM sink, which writes entity topics into the EDM store in `targ
 ```
 
 The EDM sink (`edm-sink-connector.json`) is a Debezium JDBC sink. It upserts each record on its entity key into `edm.{entity}` and deletes the row on a tombstone. It creates tables from the Schema Registry schema and adds columns when the schema gains a nullable field. Timestamps land as `timestamp` columns in UTC, truncated to milliseconds, and money as `numeric(19,4)`. It reads every entity topic by pattern and skips the `.quarantine` topics, so a new entity needs no sink config change. There are no foreign keys between EDM store tables, so orphans are allowed. `order` is a reserved word in Postgres, so quote it on its own (`"order"`), though `edm.order` works as is.
+
+The quarantine sink (`quarantine-sink-connector.json`) is the same kind of connector with the same timestamp handling. It writes `edm.{entity}.quarantine` into `quarantine.{entity}` and never deletes. Each row keeps `_dq_failures` and `_source_row_json`, and its primary key is the Kafka position: `__connect_topic` (the entity name after routing), `__connect_partition` and `__connect_offset`. A redelivered change overwrites its own row, so a connector restart or an offset reset adds nothing. A table appears with its entity's first failure. Customers have only a `warn` expectation, so `quarantine.customer` stays absent until one breaks the contract.
 
 ### 4. Verify the Pipeline
 
@@ -105,6 +107,11 @@ docker exec schema-registry kafka-avro-console-consumer \
 curl http://localhost:8083/connectors/edm-sink/status | jq '.'
 docker exec postgres-target psql -U postgres -d targetdb \
   -c "SELECT jurisdiction_code, count(*) FROM edm.product GROUP BY 1 ORDER BY 1"
+
+# Quarantine sink status, and order line failures by reason
+curl http://localhost:8083/connectors/quarantine-sink/status | jq '.'
+docker exec postgres-target psql -U postgres -d targetdb \
+  -c "SELECT _dq_failures, count(*) FROM quarantine.order_line GROUP BY 1 ORDER BY 2 DESC"
 ```
 
 ## 📊 Data Flow
@@ -429,6 +436,7 @@ docker compose logs schema-registry
 │   └── copilot-instructions.md   # AI coding agent guidance
 ├── debezium-connector.json       # CDC connector configuration
 ├── edm-sink-connector.json       # EDM sink connector configuration
+├── quarantine-sink-connector.json # Quarantine sink connector configuration
 ├── example-connector-cfg.json    # Databricks sink reference
 ├── ADDING_TABLES.md              # Guide for incremental snapshots
 └── docker-compose.yml            # Full infrastructure definition

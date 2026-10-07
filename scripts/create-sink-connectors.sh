@@ -7,12 +7,20 @@
 #                             topics.regex matches every entity topic but not
 #                             edm.{entity}.quarantine, so a new entity needs
 #                             no change here.
+#   quarantine-sink-connector.json
+#                             quarantine sink: edm.{entity}.quarantine ->
+#                             quarantine.{entity}, append-only. The primary key
+#                             is the Kafka topic, partition and offset, so a
+#                             redelivered change overwrites its own row instead
+#                             of adding a second one.
 #
-# Transforms in the EDM sink config, in order:
+# Transforms in the EDM sink config, in order (the quarantine sink uses the
+# same ones except key, which it doesn't need):
 #   key        wraps the plain string entity key in a struct, because the
 #              Debezium JDBC sink can't upsert on a primitive key
-#   entity     strips the edm. prefix from the topic; collection.name.format
-#              puts it back as the schema (a dot in ${topic} becomes _)
+#   entity     cuts the topic down to the entity name (and drops .quarantine
+#              in the quarantine sink); collection.name.format adds the schema
+#              (a dot in ${topic} would become _)
 #   the rest   one TimestampConverter per timestamp field name, epoch micros
 #              to a timestamp. A record without that field, or a tombstone,
 #              passes through unchanged.
@@ -24,7 +32,7 @@ set -e
 cd "$(dirname "$0")/.."
 
 KAFKA_CONNECT_URL="${KAFKA_CONNECT_URL:-http://localhost:8083}"
-SINK_CONFIGS="${SINK_CONFIGS:-edm-sink-connector.json}"
+SINK_CONFIGS="${SINK_CONFIGS:-edm-sink-connector.json quarantine-sink-connector.json}"
 
 echo "⏳ Waiting for Kafka Connect to be ready..."
 until curl -s -f -o /dev/null "$KAFKA_CONNECT_URL"; do
@@ -39,7 +47,11 @@ for config_file in $SINK_CONFIGS; do
         echo "❌ Error: Config file '$config_file' not found"
         exit 1
     fi
-    name=$(jq -r '.name' "$config_file")
+    name=$(jq -r '.name // empty' "$config_file")
+    if [ -z "$name" ]; then
+        echo "❌ Error: '$config_file' has no .name"
+        exit 1
+    fi
 
     echo "📤 $name ($config_file)"
     RESPONSE=$(curl -s -w "\n%{http_code}" -X PUT \
