@@ -57,15 +57,17 @@ docker compose logs -f data-generator
 # Regional cdc.* topics and integrated edm.* topics (safe to rerun)
 ./scripts/create-integrated-topics.sh
 
+# Start the Streams app once its topics exist (a no-op if it's already running)
+docker start streams-app
+
 # Create the connector (first time)
 ./scripts/create-connector.sh
 
 # Or update existing connector
 ./scripts/update-connector.sh
-
-# Reset demo environment completely
-./scripts/reset-demo.sh
 ```
+
+To start over, run `./scripts/reset-demo.sh`. It stops the data generator and the Streams app, deletes every connector, every `cdc.*` and `edm.*` topic, the sink and Streams consumer groups and every Schema Registry subject, and drops the `edm` and `quarantine` schemas. The regional source rows stay. It then starts Kafka Connect and the generator again, but leaves the Streams app stopped. Rebuild by running this step and the sink step below in order. The reset uses `docker stop`/`docker start` by container name, so it works from any checkout.
 
 Entity topics use time-based `delete` retention (7 days), not compaction. Kafka is transport only; the durable copies live in Postgres ([ADR 0001](docs/adr/0001-kafka-is-transport-not-storage.md)). Entity topics created compacted by an older version of the topic script switch over when you rerun it, with no reset. To check one:
 
