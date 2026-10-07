@@ -132,6 +132,8 @@ public final class RowTransformer {
     /**
      * The source row as Avro JSON, with decimals written as strings at their
      * source scale. Plain toString() would print a decimal's raw bytes.
+     * Only top-level decimal bytes are converted: a VariableScaleDecimal
+     * struct (an unconstrained NUMERIC column) still shows its raw bytes.
      */
     static String sourceJson(GenericRecord source) {
         GenericRecord readable = new GenericData.Record(source.getSchema());

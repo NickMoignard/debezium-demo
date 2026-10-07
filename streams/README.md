@@ -46,7 +46,7 @@ docker exec schema-registry kafka-avro-console-consumer --bootstrap-server kafka
   --property schema.registry.url=http://localhost:8081 2>/dev/null | grep '^{'
 ```
 
-Swap in `edm.order.quarantine` to see rejects. Each one carries `_dq_failures` and the source row as JSON, with money written as a decimal string at the source scale (`"12.50"`).
+Swap in `edm.order.quarantine` to see quarantined changes. Each one carries `_dq_failures` and the source row as JSON, with money written as a decimal string at the source scale (`"12.50"`).
 The generator breaks about 2% of rows on purpose (`BAD_DATA_RATE`) and now and then deletes a
 cancelled order (`DELETE_RATE`), so both paths always have traffic.
 
