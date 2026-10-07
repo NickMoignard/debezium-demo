@@ -80,7 +80,7 @@ Then create the EDM sink, which writes entity topics into the EDM store in `targ
 ./scripts/create-sink-connectors.sh
 ```
 
-The EDM sink (`edm-sink-connector.json`) is a Debezium JDBC sink. It upserts each record on its entity key into `edm.{entity}` and deletes the row on a tombstone. It creates tables from the Schema Registry schema and adds columns when the schema gains a nullable field. Timestamps land as `timestamp` columns in UTC, truncated to milliseconds, and money as `numeric(19,4)`. It carries `edm.product` so far.
+The EDM sink (`edm-sink-connector.json`) is a Debezium JDBC sink. It upserts each record on its entity key into `edm.{entity}` and deletes the row on a tombstone. It creates tables from the Schema Registry schema and adds columns when the schema gains a nullable field. Timestamps land as `timestamp` columns in UTC, truncated to milliseconds, and money as `numeric(19,4)`. It reads every entity topic by pattern and skips the `.quarantine` topics, so a new entity needs no sink config change. There are no foreign keys between EDM store tables, so orphans are allowed. `order` is a reserved word in Postgres, so quote it on its own (`"order"`), though `edm.order` works as is.
 
 ### 4. Verify the Pipeline
 

@@ -3,7 +3,10 @@
 # Target Postgres database. Each config file holds one connector.
 #
 #   edm-sink-connector.json   EDM sink: edm.{entity} -> edm.{entity}, upsert on
-#                             the entity key, a tombstone deletes the row
+#                             the entity key, a tombstone deletes the row.
+#                             topics.regex matches every entity topic but not
+#                             edm.{entity}.quarantine, so a new entity needs
+#                             no change here.
 #
 # Transforms in the EDM sink config, in order:
 #   key        wraps the plain string entity key in a struct, because the
@@ -14,7 +17,7 @@
 #              to a timestamp. A record without that field, or a tombstone,
 #              passes through unchanged.
 #
-# Run scripts/create-target-schemas.sh first. Safe to rerun: PUT on
+# Create the edm and quarantine schemas first. Safe to rerun: PUT on
 # /connectors/{name}/config creates the connector or replaces its config.
 set -e
 
