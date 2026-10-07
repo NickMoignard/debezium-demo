@@ -1,6 +1,6 @@
 # Debezium CDC Demo
 
-A complete **Change Data Capture (CDC)** pipeline demonstrating real-time data replication from PostgreSQL to Kafka using Debezium, with a Python data generator for continuous demo data. 
+A **Change Data Capture (CDC)** pipeline that takes three regional PostgreSQL databases (AU, UK, US), captures their changes with Debezium, merges them into one integrated topic per entity with Kafka Streams, and lands the result in a Target PostgreSQL database: current state in the EDM store, failed changes in the quarantine log. A Python data generator keeps changes flowing.
 
 This is a demo project for educational purposes. Specifically testing various Kafka Connect connectors with Debezium and CDC pipelines. Please feel free to use and modify to test your various scenarios.
 
@@ -38,6 +38,8 @@ docker compose up -d
 docker compose ps
 ```
 
+On a first start, `streams-app` exits and restarts in a loop because its source topics don't exist yet. That's expected; it settles once step 3 creates them.
+
 ### 2. Verify Services
 
 ```bash
@@ -53,38 +55,26 @@ docker compose logs -f data-generator
 
 ### 3. Create Topics, Connectors and Target Schemas
 
+Run these in order. Each step is safe to rerun except `create-connector.sh`, which fails if the source connector already exists.
+
 ```bash
-# Regional cdc.* topics and integrated edm.* topics (safe to rerun)
+# Regional cdc.* topics and integrated edm.* topics
 ./scripts/create-integrated-topics.sh
 
 # Start the Streams app once its topics exist (a no-op if it's already running)
 docker start streams-app
 
-# Create the connector (first time)
+# Debezium source connector
 ./scripts/create-connector.sh
 
-# Or update existing connector
-./scripts/update-connector.sh
-```
-
-To start over, run `./scripts/reset-demo.sh`. It stops the data generator and the Streams app, deletes every connector, every `cdc.*` and `edm.*` topic, the sink and Streams consumer groups and every Schema Registry subject, and drops the `edm` and `quarantine` schemas. In `sourcedb` it drops `public.products` and `public.sales`, and **every replication slot and every publication**, including ones this demo didn't create. Don't run it if another project uses the same source database. The regional source rows stay. It then starts Kafka Connect and the generator again, but leaves the Streams app stopped. Rebuild by running this step and the sink step below in order. The reset uses `docker stop`/`docker start` by container name, so it works from any checkout.
-
-Entity topics use time-based `delete` retention (7 days), not compaction. Kafka is transport only; the durable copies live in Postgres ([ADR 0001](docs/adr/0001-kafka-is-transport-not-storage.md)). Entity topics created compacted by an older version of the topic script switch over when you rerun it, with no reset. To check one:
-
-```bash
-docker exec kafka kafka-configs --bootstrap-server localhost:9092 \
-  --describe --entity-type topics --entity-name edm.order
-```
-
-Then create the sinks. The EDM sink writes entity topics into the EDM store in `targetdb`, and the quarantine sink writes quarantine topics into the quarantine log:
-
-```bash
-# edm and quarantine schemas in targetdb (safe to rerun)
+# edm and quarantine schemas in targetdb
 ./scripts/create-target-schemas.sh
 
-# Create or update the sink connectors from their JSON configs (safe to rerun)
+# EDM sink and quarantine sink
 ./scripts/create-sink-connectors.sh
 ```
+
+To change the source connector later, edit `debezium-connector.json` and run `./scripts/update-connector.sh` instead. The sink script applies config changes on rerun.
 
 The EDM sink (`edm-sink-connector.json`) is a Debezium JDBC sink. It upserts each record on its entity key into `edm.{entity}` and deletes the row on a tombstone. It creates tables from the Schema Registry schema and adds columns when the schema gains a nullable field.
 
@@ -95,6 +85,13 @@ The sink reads every entity topic by pattern and skips the `.quarantine` topics.
 There are no foreign keys between EDM store tables, so orphans are allowed. `order` is a reserved word in Postgres, so quote it when it stands alone (`"order"`). `edm.order` works as is.
 
 The quarantine sink (`quarantine-sink-connector.json`) is the same kind of connector with the same timestamp handling. It writes `edm.{entity}.quarantine` into `quarantine.{entity}` and never deletes. Each row keeps `_dq_failures` and `_source_row_json`, and its primary key is the Kafka position: `__connect_topic` (the entity name after routing), `__connect_partition` and `__connect_offset`. A redelivered change overwrites its own row, so a connector restart or an offset reset adds nothing. A table appears with its entity's first failure. Customers have only a `warn` expectation, so `quarantine.customer` stays absent until one breaks the contract.
+
+Entity topics use time-based `delete` retention (7 days), not compaction. Kafka is transport only; the durable copies live in Postgres ([ADR 0001](docs/adr/0001-kafka-is-transport-not-storage.md)). Entity topics created compacted by an older version of the topic script switch over when you rerun it, with no reset. To check one:
+
+```bash
+docker exec kafka kafka-configs --bootstrap-server localhost:9092 \
+  --describe --entity-type topics --entity-name edm.order
+```
 
 ### 4. Verify the Pipeline
 
@@ -140,6 +137,33 @@ The script pauses the data generator, waits for the pipeline to drain and runs f
 - **Types**: timestamp columns are timestamps and money columns are `numeric(19,4)`.
 
 It exits non-zero and names the entity and region on any mismatch, for example `❌ order UK: 1 source key(s) in neither the EDM store nor quarantine, 0 EDM row(s) with no live source row`. Consumer lag never reaches zero, because each Streams transaction leaves a commit marker the sinks don't consume. So "drained" means the Streams app has caught up on `cdc.*`, sink lag is at most a few offsets, and offsets and target writes hold still across two polls.
+
+### Starting Over
+
+```bash
+./scripts/reset-demo.sh
+```
+
+The reset stops the data generator and the Streams app, deletes every connector, every `cdc.*` and `edm.*` topic, the sink and Streams consumer groups and every Schema Registry subject, and drops the `edm` and `quarantine` schemas. In `sourcedb` it drops `public.products` and `public.sales`, and **every replication slot and every publication**, including ones this demo didn't create. Don't run it if another project uses the same source database. The regional source rows stay.
+
+It starts Kafka Connect and the generator again but leaves the Streams app stopped. Rebuild with step 3, then run step 5 after a few minutes of traffic. The reset uses `docker stop`/`docker start` by container name, so it works from any checkout.
+
+### After a Code Change
+
+Rebuild and restart just the service you changed. `--no-deps` leaves Kafka and the databases alone.
+
+```bash
+# Streams app (streams/)
+docker compose build streams-app && docker compose up -d --no-deps streams-app
+
+# Data generator (app_multi_region/)
+docker compose build data-generator && docker compose up -d --no-deps data-generator
+
+# Kafka Connect image (connect/). Connectors are stored in Kafka and come back on their own
+docker compose build kafka-connect && docker compose up -d --no-deps kafka-connect
+```
+
+After a restart the Streams app takes up to a minute to rejoin its group before it processes again. Entity topic schemas are checked against Schema Registry's BACKWARD rule on the first write, so a spec change that breaks it stops the app; see [streams/README.md](streams/README.md).
 
 ## 🔍 Demo Queries
 
@@ -355,14 +379,17 @@ docker compose build kafka-connect
 
 ### Running the Data Generator Locally
 
+The stack runs the generator in `app_multi_region/`. To run it from your machine instead, stop the container first so the two don't both write:
+
 ```bash
-cd app/
+docker stop data-generator
+cd app_multi_region/
 
 # Install dependencies with UV
 uv sync
 
-# Run locally (requires PostgreSQL running)
-uv run python main.py
+# Point it at the source database's host port
+DB_HOST=localhost uv run python main.py
 ```
 
 ## 📝 Common Operations
@@ -543,11 +570,16 @@ docker compose logs schema-registry
 
 ```
 .
-├── app/                            # Python data generator
-│   ├── main.py                     # Faker-based data insertion
+├── app_multi_region/               # Python data generator (AU, UK, US regions)
+│   ├── main.py                     # Faker-based inserts, status updates, deletes, bad rows
 │   ├── logger.py                   # Centralized logging utility
 │   ├── pyproject.toml              # UV dependencies
 │   └── Dockerfile                  # UV-based container build
+├── streams/                        # Kafka Streams region integration app
+│   ├── config/regions.yaml         # Region registry
+│   ├── config/entities/*.yaml      # One spec per entity: columns, types, expectations
+│   ├── src/                        # Topology, transformer, tests
+│   └── README.md                   # How the integration works
 ├── connect/                        # Custom Kafka Connect image
 │   ├── Dockerfile                  # Multi-stage build
 │   └── build.gradle                # JDBC driver management
@@ -560,12 +592,13 @@ docker compose logs schema-registry
 │   ├── verify-edm-store.sh         # Reconcile the EDM store and run the end-to-end checks
 │   ├── reset-demo.sh               # Reset entire environment
 │   └── add-tables.sh               # Add tables with incremental snapshot
+├── docs/adr/                       # Architecture decision records
 ├── .github/
 │   └── copilot-instructions.md     # AI coding agent guidance
+├── CONTEXT.md                      # Domain glossary
 ├── debezium-connector.json         # CDC connector configuration
 ├── edm-sink-connector.json         # EDM sink connector configuration
 ├── quarantine-sink-connector.json  # Quarantine sink connector configuration
-├── example-connector-cfg.json      # Databricks sink reference
 ├── ADDING_TABLES.md                # Guide for incremental snapshots
 └── docker-compose.yml              # Full infrastructure definition
 ```
