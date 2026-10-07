@@ -55,7 +55,7 @@ REGIONS=$(sed -n -E 's/.*code: *([A-Z]+), *schema: *([a-z_]+).*/\1:\2/p' streams
 
 FAILED=0
 
-src_sql() { docker exec -i postgres-source psql -U postgres -d sourcedb -X -q -At -v ON_ERROR_STOP=1 "$@"; }
+src_sql() { docker exec postgres-source psql -U postgres -d sourcedb -X -q -At -v ON_ERROR_STOP=1 "$@"; }
 tgt_sql() { docker exec -i postgres-target psql -U postgres -d targetdb -X -q -At -v ON_ERROR_STOP=1 "$@"; }
 
 fail() { echo "   ❌ $*"; FAILED=$((FAILED + 1)); }
@@ -121,8 +121,24 @@ writes $(target_writes)"
 
 # ---------------------------------------------------------------------------
 
+# Runs on every exit, including a failure or Ctrl-C midway through the
+# restart check: resume the quarantine sink if this script stopped it, and
+# start the data generator again.
+SINK_STOPPED=""
+cleanup() {
+    if [ -n "$SINK_STOPPED" ]; then
+        if curl -s -f -o /dev/null -X PUT "$KAFKA_CONNECT_URL/connectors/$QUARANTINE_SINK/resume"; then
+            echo "▶  $QUARANTINE_SINK resumed"
+        else
+            echo "❌ Could not resume $QUARANTINE_SINK: curl -X PUT $KAFKA_CONNECT_URL/connectors/$QUARANTINE_SINK/resume"
+        fi
+    fi
+    docker start data-generator > /dev/null && echo "▶  Data generator started"
+}
+trap cleanup EXIT
+trap 'exit 130' INT TERM
+
 echo "⏸  Pausing the data generator"
-trap 'docker start data-generator > /dev/null && echo "▶  Data generator started"' EXIT
 docker stop data-generator > /dev/null
 
 echo "🔌 Connectors"
@@ -287,10 +303,15 @@ quarantine_upserts() {
     tgt_sql -c "SELECT coalesce(sum(n_tup_upd), 0) FROM pg_stat_user_tables WHERE schemaname = 'quarantine'"
 }
 
-curl -s -f -o /dev/null -X PUT "$KAFKA_CONNECT_URL/connectors/$QUARANTINE_SINK/stop"
+SINK_STOPPED=1
+curl -s -f -o /dev/null -X PUT "$KAFKA_CONNECT_URL/connectors/$QUARANTINE_SINK/stop" ||
+    fail "could not stop $QUARANTINE_SINK"
 waited=0
 until [ "$(connector_state "$QUARANTINE_SINK")" = "STOPPED" ]; do
-    [ "$waited" -ge "$WAIT_TIMEOUT_S" ] && break
+    if [ "$waited" -ge "$WAIT_TIMEOUT_S" ]; then
+        fail "$QUARANTINE_SINK did not stop within ${WAIT_TIMEOUT_S}s"
+        break
+    fi
     sleep 1
     waited=$((waited + 1))
 done
@@ -300,7 +321,11 @@ offsets_before=$(sink_offsets)
 curl -s -f -o /dev/null -X DELETE "$KAFKA_CONNECT_URL/connectors/$QUARANTINE_SINK/offsets" ||
     fail "could not delete the $QUARANTINE_SINK offsets"
 offsets_reset=$(sink_offsets)
-curl -s -f -o /dev/null -X PUT "$KAFKA_CONNECT_URL/connectors/$QUARANTINE_SINK/resume"
+if curl -s -f -o /dev/null -X PUT "$KAFKA_CONNECT_URL/connectors/$QUARANTINE_SINK/resume"; then
+    SINK_STOPPED=""
+else
+    fail "could not resume $QUARANTINE_SINK"
+fi
 echo "   offsets $offsets_before → ${offsets_reset} → resumed"
 
 waited=0
