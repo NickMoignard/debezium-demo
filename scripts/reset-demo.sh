@@ -4,6 +4,10 @@
 # quarantine log. The regional source tables and their rows stay, so the
 # Debezium connector re-snapshots them when it is created again.
 #
+# In sourcedb it also drops public.products and public.sales, and EVERY
+# replication slot and EVERY publication, including ones this demo didn't
+# create. Another project's slot or publication on the same database is lost.
+#
 # Uses docker stop/start by container name rather than docker compose, so it
 # works from any checkout of the repo. The containers must already exist.
 set -e
@@ -226,7 +230,7 @@ echo ""
 
 echo -e "${GREEN}✅ Reset complete!${NC}"
 echo ""
-echo "Next steps (the same as README step 3):"
+echo "Next steps (README steps 3 and 5):"
 echo "  1. Verify Kafka Connect is ready: curl http://localhost:8083/ | jq '.'"
 echo "  2. ./scripts/create-integrated-topics.sh"
 echo "  3. docker start streams-app"
