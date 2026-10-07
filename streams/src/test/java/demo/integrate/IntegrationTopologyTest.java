@@ -147,6 +147,26 @@ class IntegrationTopologyTest {
     }
 
     @Test
+    void quarantinedSourceJsonShowsMoneyAsDecimalStrings() {
+        send("au", "line_items", 12, "c", lineItem(12, 1, 1, 2, "-12.50"));
+
+        String json = output("edm.order_line.quarantine").readValue().get("_source_row_json").toString();
+        assertThat(json).contains("\"line_item_discount\": \"-12.50\"", "\"quantity\": 2", "\"id\": 12");
+    }
+
+    @Test
+    void quarantinedProductSourceJsonShowsPriceOrNull() {
+        send("uk", "products", 20, "c", product(20, "-5.00"));
+        send("uk", "products", 21, "c", product(21, null));
+
+        List<String> json = output("edm.product.quarantine").readValuesToList().stream()
+                .map(r -> r.get("_source_row_json").toString()).toList();
+        assertThat(json).hasSize(2);
+        assertThat(json.get(0)).contains("\"price\": \"-5.00\"", "\"name\": \"Widget\"");
+        assertThat(json.get(1)).contains("\"price\": null");
+    }
+
+    @Test
     void quarantinesUnknownStatusAndMissingCustomer() {
         send("au", "orders", 2, "u", order(2, null, "lost"));
 
@@ -222,6 +242,16 @@ class IntegrationTopologyTest {
         row.put("line_item_discount", Debezium.decimalBytes(discount, 2));
         row.put("created_at", CREATED_MICROS);
         row.put("updated_at", CREATED_MICROS);
+        return row;
+    }
+
+    private static Map<String, Object> product(int id, String price) {
+        Map<String, Object> row = new HashMap<>();
+        row.put("id", id);
+        row.put("name", "Widget");
+        row.put("price", price == null ? null : Debezium.decimalBytes(price, 2));
+        row.put("stock_quantity", 1);
+        row.put("created_at", CREATED_MICROS);
         return row;
     }
 

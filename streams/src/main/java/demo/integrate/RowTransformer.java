@@ -123,10 +123,27 @@ public final class RowTransformer {
         if (!failures.isEmpty()) {
             GenericRecord q = encode(quarantineSchema, values);
             q.put("_dq_failures", failures);
-            q.put("_source_row_json", source == null ? null : source.toString());
+            q.put("_source_row_json", source == null ? null : sourceJson(source));
             return Outcome.quarantine(q);
         }
         return drop ? Outcome.drop() : Outcome.valid(encode(edmSchema, values));
+    }
+
+    /**
+     * The source row as Avro JSON, with decimals written as strings at their
+     * source scale. Plain toString() would print a decimal's raw bytes.
+     */
+    static String sourceJson(GenericRecord source) {
+        GenericRecord readable = new GenericData.Record(source.getSchema());
+        for (Schema.Field f : source.getSchema().getFields()) {
+            Object value = source.get(f.pos());
+            Schema type = nonNull(f.schema());
+            if (value instanceof ByteBuffer && type.getLogicalType() instanceof LogicalTypes.Decimal) {
+                value = decimal(type, value).toPlainString();
+            }
+            readable.put(f.pos(), value);
+        }
+        return readable.toString();
     }
 
     private static GenericRecord encode(Schema schema, Map<String, Object> values) {
