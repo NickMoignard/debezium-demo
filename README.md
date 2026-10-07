@@ -169,6 +169,8 @@ After a restart the Streams app takes up to a minute to rejoin its group before 
 
 Run these against a running stack. `order` is quoted because it is a reserved word.
 
+For a live presentation, with source and target side by side and a change you make yourself going through the EDM store and quarantine, follow [DEMO.md](DEMO.md).
+
 ### One entity across regions
 
 The same source id exists in every region. The entity key keeps them apart, and so does every foreign key column:
