@@ -2,3 +2,19 @@
 .postgres-target
 data
 .minio_data
+__pycache__/
+
+.scratch/
+
+# Local credentials and build output
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+.aws/
+.venv/
+.gradle/
+build/
+connect/connect-lib/
+.DS_Store

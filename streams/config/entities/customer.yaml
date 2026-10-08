@@ -1,0 +1,23 @@
+entity: customer
+source_table: users
+key: id
+money: false
+# Direct identifiers never leave the regional topic. Listing them here makes
+# the exclusion explicit: the spec fails to load if one is also selected.
+pii_exclude:
+  - first_name
+  - last_name
+  - email
+  - phone_number
+  - address_line_one
+  - address_line_two
+columns:
+  - { source: id,          name: customer_id,    type: long }
+  - { source: city,                              type: string }
+  - { source: state,       name: state_province, type: string }
+  - { source: postal_code,                       type: string }
+  - { source: country,     name: country_name,   type: string }
+  - { source: created_at,  name: registered_at,  type: timestamp_utc }
+  - { source: updated_at,                        type: timestamp_utc }
+expectations:
+  - { name: country_present, kind: not_null, column: country_name, action: warn }

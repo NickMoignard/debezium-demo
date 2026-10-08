@@ -1,0 +1,18 @@
+entity: order
+source_table: orders
+key: id
+money: false
+columns:
+  - { source: id,           name: order_id,    type: long }
+  - { source: user_id,      name: customer_id, type: long, fk: customer, fk_key: customer_key }
+  - { source: order_status,                    type: string }
+  - { source: promo_code,                      type: string }
+  - { source: created_at,   name: placed_at,   type: timestamp_utc }
+  - { source: updated_at,                      type: timestamp_utc }
+expectations:
+  - { name: has_customer, kind: not_null, column: customer_id, action: quarantine }
+  - name: known_status
+    kind: in_set
+    column: order_status
+    values: [pending, paid, shipped, delivered, cancelled]
+    action: quarantine

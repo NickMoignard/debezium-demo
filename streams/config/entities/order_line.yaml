@@ -1,0 +1,17 @@
+entity: order_line
+source_table: line_items
+key: id
+money: true
+columns:
+  - { source: id,                 name: order_line_id,   type: long }
+  - { source: order_id,                                  type: long, fk: order,   fk_key: order_key }
+  - { source: product_id,                                type: long, fk: product, fk_key: product_key }
+  - { source: quantity,                                  type: int }
+  - { source: line_item_discount, name: discount_amount, type: money }
+  - { source: created_at,                                type: timestamp_utc }
+  - { source: updated_at,                                type: timestamp_utc }
+expectations:
+  - { name: has_order,             kind: not_null, column: order_id,        action: quarantine }
+  - { name: has_product,           kind: not_null, column: product_id,      action: quarantine }
+  - { name: positive_quantity,     kind: gt,       column: quantity,        value: 0, action: quarantine }
+  - { name: discount_non_negative, kind: gte,      column: discount_amount, value: 0, action: quarantine }
