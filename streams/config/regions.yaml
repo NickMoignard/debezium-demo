@@ -1,0 +1,8 @@
+# Region registry for the demo source schemas.
+# One row per geo. Adding a region is a row here plus its tables in the
+# Debezium connector; the topology picks it up on restart with no code change.
+topic_prefix: cdc
+regions:
+  - { code: AU, schema: au, jurisdiction_id: 1, currency_code: AUD, timezone: Australia/Melbourne }
+  - { code: UK, schema: uk, jurisdiction_id: 2, currency_code: GBP, timezone: Europe/London }
+  - { code: US, schema: us, jurisdiction_id: 3, currency_code: USD, timezone: America/Chicago }

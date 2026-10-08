@@ -38,29 +38,18 @@ task copyJdbcDrivers(type: Copy) {
     }
 }
 
-// Copy any additional JAR files (like custom converters)
-task copyCustomJars(type: Copy) {
-    from fileTree('.') {
-        include '*.jar'
-        exclude 'build/**'
-    }
-    into 'custom-jars'
-}
-
 // Main task to prepare all dependencies
 task prepareConnectDependencies(dependsOn: [
-    copyJdbcDrivers,
-    copyCustomJars
+    copyJdbcDrivers
 ]) {
     doLast {
         println "All Kafka Connect dependencies prepared:"
         println "- JDBC drivers: ${fileTree('connect-lib').files.size()} files"
         println "- Debezium connectors: ${fileTree('debezium-connectors').files.size()} files"
-        println "- Custom JARs: ${fileTree('custom-jars').files.size()} files"
     }
 }
 
 // Clean task to remove generated directories
 task cleanConnectDependencies(type: Delete) {
-    delete 'connect-lib', 'custom-jars'
+    delete 'connect-lib'
 }

@@ -1,22 +1,31 @@
 # Debezium CDC Demo
 
-A complete **Change Data Capture (CDC)** pipeline demonstrating real-time data replication from PostgreSQL to Kafka using Debezium, with a Python data generator for continuous demo data. 
+A **Change Data Capture (CDC)** pipeline that takes three regional PostgreSQL databases (AU, UK, US), captures their changes with Debezium, merges them into one integrated topic per entity with Kafka Streams, and lands the result in a Target PostgreSQL database: current state in the EDM store, failed changes in the quarantine log. A Python data generator keeps changes flowing.
 
 This is a demo project for educational purposes. Specifically testing various Kafka Connect connectors with Debezium and CDC pipelines. Please feel free to use and modify to test your various scenarios.
+
+The stack uses synthetic data and fixed local demo passwords. Run it on a trusted development
+machine; it is not configured for public network access. Keep real credentials in local
+environment variables or ignored `.env` files.
 
 ## 🏗️ Architecture
 
 ```
-Python Data Generator → PostgreSQL Source → Debezium → Kafka → Schema Registry → Sinks
+Python Data Generator → PostgreSQL Source → Debezium → cdc.{au,uk,us}.* → Kafka Streams
+  → edm.{entity}            → EDM sink        → PostgreSQL Target: edm.{entity}         (EDM store)
+  → edm.{entity}.quarantine → quarantine sink → PostgreSQL Target: quarantine.{entity}  (quarantine log)
 ```
 
 **Components:**
-- **PostgreSQL (Source & Target)**: Source database with logical replication enabled
-- **Debezium**: CDC connector capturing database changes
+- **PostgreSQL Source**: Source database with logical replication enabled. Each region is a schema (`au`, `uk`, `us`, `eu`, `ca`) standing in for a separate regional database
+- **PostgreSQL Target** (`targetdb`): the EDM store (schema `edm`, one current-state row per live entity key) and the quarantine log (schema `quarantine`, every change that failed checks)
+- **Debezium**: CDC connector capturing the `au`, `uk` and `us` schemas
 - **Kafka (KRaft mode)**: Event streaming platform
 - **Schema Registry**: Avro schema management
+- **Kafka Streams** (`streams/`): unions the three regional topics per table into one integrated topic per entity. See [streams/README.md](streams/README.md)
+- **Debezium JDBC sinks**: the EDM sink and the quarantine sink, which write the Streams output into the Target database
 - **MinIO**: S3-compatible object storage for staging
-- **Python Data Generator**: Continuously generates fake products and sales data
+- **Python Data Generator** (`app_multi_region/`): products, users, orders and line items per region, with order status updates, occasional deletes and some deliberately bad rows
 
 ## 🚀 Quick Start
 
@@ -33,6 +42,8 @@ docker compose up -d
 docker compose ps
 ```
 
+On a first start, `streams-app` exits and restarts in a loop because its source topics don't exist yet. That's expected; it settles once step 3 creates them.
+
 ### 2. Verify Services
 
 ```bash
@@ -46,55 +57,233 @@ curl http://localhost:8081/subjects
 docker compose logs -f data-generator
 ```
 
-### 3. Create Debezium CDC Connector
+### 3. Create Topics, Connectors and Target Schemas
+
+Run these in order. Each step is safe to rerun except `create-connector.sh`, which fails if the source connector already exists.
 
 ```bash
-# Create the connector (first time)
+# Regional cdc.* topics and integrated edm.* topics
+./scripts/create-integrated-topics.sh
+
+# Start the Streams app once its topics exist (a no-op if it's already running)
+docker start streams-app
+
+# Debezium source connector
 ./scripts/create-connector.sh
 
-# Or update existing connector
-./scripts/update-connector.sh
+# edm and quarantine schemas in targetdb
+./scripts/create-target-schemas.sh
 
-# Reset demo environment completely
-./scripts/reset-demo.sh
+# EDM sink and quarantine sink
+./scripts/create-sink-connectors.sh
 ```
 
-### 4. Verify CDC Pipeline
+To change the source connector later, edit `debezium-connector.json` and run `./scripts/update-connector.sh` instead. The sink script applies config changes on rerun.
+
+The EDM sink (`edm-sink-connector.json`) is a Debezium JDBC sink. It upserts each record on its entity key into `edm.{entity}` and deletes the row on a tombstone. It creates tables from the Schema Registry schema and adds columns when the schema gains a nullable field.
+
+Timestamps land as `timestamp` columns in UTC, truncated to milliseconds, and money as `numeric(19,4)`. Each timestamp field name has its own `TimestampConverter` in both sink configs (`created_at`, `updated_at`, `placed_at`, `registered_at`, `_processed_at`).
+
+The sink reads every entity topic by pattern and skips the `.quarantine` topics. A new entity whose timestamp fields reuse those names needs no sink config change. A new timestamp field name needs one more converter in each sink config, or it lands as a `bigint` of epoch microseconds.
+
+There are no foreign keys between EDM store tables, so orphans are allowed. `order` is a reserved word in Postgres, so quote it when it stands alone (`"order"`). `edm.order` works as is.
+
+The quarantine sink (`quarantine-sink-connector.json`) is the same kind of connector with the same timestamp handling. It writes `edm.{entity}.quarantine` into `quarantine.{entity}` and never deletes. Each row keeps `_dq_failures` and `_source_row_json`, and its primary key is the Kafka position: `__connect_topic` (the entity name after routing), `__connect_partition` and `__connect_offset`. A redelivered change overwrites its own row, so a connector restart or an offset reset adds nothing. A table appears with its entity's first failure. Customers have only a `warn` expectation, so `quarantine.customer` stays absent until one breaks the contract.
+
+Entity topics use time-based `delete` retention (7 days), not compaction. Kafka is transport only; the durable copies live in Postgres ([ADR 0001](docs/adr/0001-kafka-is-transport-not-storage.md)). Entity topics created compacted by an older version of the topic script switch over when you rerun it, with no reset. To check one:
+
+```bash
+docker exec kafka kafka-configs --bootstrap-server localhost:9092 \
+  --describe --entity-type topics --entity-name edm.order
+```
+
+### 4. Verify the Pipeline
 
 ```bash
 # Check connector status
 curl http://localhost:8083/connectors/debezium-postgres-source/status | jq '.'
 
-# List Kafka topics (should see cdc.public.products and cdc.public.sales)
+# List Kafka topics (cdc.au.orders, cdc.uk.orders, ... and edm.order, edm.order.quarantine, ...)
 docker exec kafka kafka-topics --list --bootstrap-server localhost:9092
 
-# Consume CDC events from products table
-docker exec kafka kafka-console-consumer \
-  --bootstrap-server localhost:9092 \
-  --topic cdc.public.products \
-  --from-beginning
+# Raw CDC events from one region
+docker exec schema-registry kafka-avro-console-consumer \
+  --bootstrap-server kafka:29092 --topic cdc.au.orders --from-beginning \
+  --property schema.registry.url=http://localhost:8081 2>/dev/null | grep '^{'
 
-# Consume CDC events from sales table
-docker exec kafka kafka-console-consumer \
-  --bootstrap-server localhost:9092 \
-  --topic cdc.public.sales \
-  --from-beginning
+# The same entity integrated across all three regions
+docker exec schema-registry kafka-avro-console-consumer \
+  --bootstrap-server kafka:29092 --topic edm.order --from-beginning \
+  --property schema.registry.url=http://localhost:8081 2>/dev/null | grep '^{'
+
+# EDM sink status, and products in the EDM store per region
+curl http://localhost:8083/connectors/edm-sink/status | jq '.'
+docker exec postgres-target psql -U postgres -d targetdb \
+  -c "SELECT jurisdiction_code, count(*) FROM edm.product GROUP BY 1 ORDER BY 1"
+
+# Quarantine sink status, and order line failures by reason
+curl http://localhost:8083/connectors/quarantine-sink/status | jq '.'
+docker exec postgres-target psql -U postgres -d targetdb \
+  -c "SELECT _dq_failures, count(*) FROM quarantine.order_line GROUP BY 1 ORDER BY 2 DESC"
+```
+
+### 5. Prove the EDM Store
+
+```bash
+./scripts/verify-edm-store.sh
+```
+
+The script pauses the data generator, waits for the pipeline to drain and runs four checks. The generator starts again when the script exits, pass or fail.
+
+- **Reconcile**: per entity and region, every live source row has an EDM store row or a quarantine row, and every EDM store row has a live source row. Entity keys are recomputed from the source with the Streams formula. The table shows `quarantined` (no EDM row because the change failed checks) and `stale` (the EDM row is older than the key's latest quarantine row, so the store keeps the last version that passed).
+- **Delete**: a probe product inserted in AU reaches the EDM store, then a source delete removes it. Quarantine counts don't move.
+- **Restart**: the quarantine sink is stopped, its offsets are deleted, and it re-reads every quarantine topic from the start. The quarantine tables come out identical.
+- **Types**: timestamp columns are timestamps and money columns are `numeric(19,4)`.
+
+It exits non-zero and names the entity and region on any mismatch, for example `❌ order UK: 1 source key(s) in neither the EDM store nor quarantine, 0 EDM row(s) with no live source row`. Consumer lag never reaches zero, because each Streams transaction leaves a commit marker the sinks don't consume. So "drained" means the Streams app has caught up on `cdc.*`, sink lag is at most a few offsets, and offsets and target writes hold still across two polls.
+
+### Starting Over
+
+```bash
+./scripts/reset-demo.sh
+```
+
+The reset stops the data generator and the Streams app, deletes every connector, every `cdc.*` and `edm.*` topic, the sink and Streams consumer groups and every Schema Registry subject, and drops the `edm` and `quarantine` schemas. In `sourcedb` it drops `public.products` and `public.sales`, and **every replication slot and every publication**, including ones this demo didn't create. Don't run it if another project uses the same source database. The regional source rows stay.
+
+It starts Kafka Connect and the generator again but leaves the Streams app stopped. Rebuild with step 3, then run step 5 after a few minutes of traffic. The reset uses `docker stop`/`docker start` by container name, so it works from any checkout.
+
+### After a Code Change
+
+Rebuild and restart just the service you changed. `--no-deps` leaves Kafka and the databases alone.
+
+```bash
+# Streams app (streams/)
+docker compose build streams-app && docker compose up -d --no-deps streams-app
+
+# Data generator (app_multi_region/)
+docker compose build data-generator && docker compose up -d --no-deps data-generator
+
+# Kafka Connect image (connect/). Connectors are stored in Kafka and come back on their own
+docker compose build kafka-connect && docker compose up -d --no-deps kafka-connect
+```
+
+After a restart the Streams app takes up to a minute to rejoin its group before it processes again. Entity topic schemas are checked against Schema Registry's BACKWARD rule on the first write, so a spec change that breaks it stops the app; see [streams/README.md](streams/README.md).
+
+## 🔍 Demo Queries
+
+Run these against a running stack. `order` is quoted because it is a reserved word.
+
+For a live presentation, with source and target side by side and a change you make yourself going through the EDM store and quarantine, follow [DEMO.md](DEMO.md).
+
+### One entity across regions
+
+The same source id exists in every region. The entity key keeps them apart, and so does every foreign key column:
+
+```bash
+# One order id, three regions, three entity keys
+docker exec postgres-target psql -U postgres -d targetdb -c "
+SELECT jurisdiction_code, order_id, left(_entity_key, 12) AS entity_key,
+       left(customer_key, 12) AS customer_key, order_status, placed_at
+FROM edm.\"order\" WHERE order_id = 42 ORDER BY 1"
+
+# Orders per region and status
+docker exec postgres-target psql -U postgres -d targetdb -c "
+SELECT jurisdiction_code, order_status, count(*)
+FROM edm.\"order\" GROUP BY 1, 2 ORDER BY 1, 2"
+```
+
+### Orphans and the quarantine log
+
+An orphan is a row whose parent isn't in the EDM store. Most orphaned order lines belong to an order that was quarantined. The rest (`order_unaccounted`) belong to an order that is still in flight, or one deleted at the source while its lines were kept:
+
+```bash
+# Order lines whose order isn't in the EDM store, and whether that order was quarantined
+docker exec postgres-target psql -U postgres -d targetdb -c "
+SELECT ol.jurisdiction_code,
+       count(*) AS orphan_lines,
+       count(*) FILTER (WHERE q.order_key IS NOT NULL) AS order_quarantined,
+       count(*) FILTER (WHERE q.order_key IS NULL) AS order_unaccounted
+FROM edm.order_line ol
+LEFT JOIN edm.\"order\" o ON o._entity_key = ol.order_key
+LEFT JOIN (SELECT DISTINCT _entity_key AS order_key FROM quarantine.\"order\") q
+       ON q.order_key = ol.order_key
+WHERE o._entity_key IS NULL
+GROUP BY 1 ORDER BY 1"
+
+# Why those orders were quarantined (latest failure per order)
+docker exec postgres-target psql -U postgres -d targetdb -c "
+SELECT q._dq_failures, q.order_status, count(*) AS orphan_lines
+FROM edm.order_line ol
+LEFT JOIN edm.\"order\" o ON o._entity_key = ol.order_key
+JOIN (SELECT DISTINCT ON (_entity_key) _entity_key, _dq_failures, order_status
+      FROM quarantine.\"order\" ORDER BY _entity_key, _source_lsn DESC) q
+  ON q._entity_key = ol.order_key
+WHERE o._entity_key IS NULL
+GROUP BY 1, 2 ORDER BY 3 DESC"
+```
+
+### End-to-end lag
+
+`_source_ts_ms` is when the change committed in the regional database, and `_processed_at` is when the Streams app wrote it. The sink hop isn't stamped on the row, so `newest_row_age` gives the other half: how old the newest row in the store is right now.
+
+```bash
+# Source commit to Streams processing for order changes in the last 5 minutes,
+# and the age of the newest row in the EDM store
+docker exec postgres-target psql -U postgres -d targetdb -c "
+SELECT jurisdiction_code, count(*) AS changes,
+       percentile_cont(0.5)  WITHIN GROUP (ORDER BY lag) AS p50,
+       percentile_cont(0.95) WITHIN GROUP (ORDER BY lag) AS p95,
+       max(lag) AS worst,
+       now() AT TIME ZONE 'UTC' - max(_processed_at) AS newest_row_age
+FROM (SELECT jurisdiction_code, _processed_at,
+             _processed_at - to_timestamp(_source_ts_ms / 1000.0) AT TIME ZONE 'UTC' AS lag
+      FROM edm.\"order\"
+      WHERE _processed_at > now() AT TIME ZONE 'UTC' - interval '5 minutes') recent
+GROUP BY 1 ORDER BY 1"
+```
+
+### Watch a delete happen
+
+A source delete becomes a tombstone on the entity topic, and the EDM sink removes the row. The store keeps no record of a deleted entity.
+
+```bash
+SRC="docker exec postgres-source psql -U postgres -d sourcedb"
+EDM="docker exec postgres-target psql -U postgres -d targetdb"
+
+# 1. Pick a delivered AU order that has line items
+ID=$($SRC -At -c "SELECT o.id FROM au.orders o JOIN au.line_items li ON li.order_id = o.id
+                   WHERE o.order_status = 'delivered' ORDER BY o.id DESC LIMIT 1")
+
+# 2. It's in the EDM store with its lines
+$EDM -c "SELECT o.order_id, o.order_status, count(ol._entity_key) AS lines
+         FROM edm.\"order\" o LEFT JOIN edm.order_line ol ON ol.order_key = o._entity_key
+         WHERE o.jurisdiction_code = 'AU' AND o.order_id = $ID GROUP BY 1, 2"
+
+# 3. Delete it at the source, lines first
+$SRC -c "DELETE FROM au.line_items WHERE order_id = $ID" -c "DELETE FROM au.orders WHERE id = $ID"
+
+# 4. A second or two later the order and its lines are gone
+sleep 2
+$EDM -c "SELECT (SELECT count(*) FROM edm.\"order\" WHERE jurisdiction_code = 'AU' AND order_id = $ID) AS orders,
+                (SELECT count(*) FROM edm.order_line WHERE jurisdiction_code = 'AU' AND order_id = $ID) AS lines"
 ```
 
 ## 📊 Data Flow
 
-1. **Python Data Generator** inserts 1-2 records/second into `products` and `sales` tables
+1. **Python Data Generator** places 1-2 orders per second per region, with line items, and moves existing orders through `pending → paid → shipped → delivered` (or `cancelled`)
 2. **PostgreSQL** commits transactions and writes to WAL (Write-Ahead Log)
-3. **Debezium** reads from WAL via logical replication slot
-4. **Kafka** receives CDC events as Avro-encoded messages
-5. **Schema Registry** stores and versions the Avro schemas
-6. **Consumers** can subscribe to topics for downstream processing
+3. **Debezium** reads from WAL via logical replication slot and writes one topic per region and table, `cdc.{region}.{table}`, keeping the full change envelope
+4. **Schema Registry** stores and versions the Avro schemas
+5. **Kafka Streams** merges the regional topics, stamps region and currency, renames and retypes columns, applies DQ expectations and writes `edm.{entity}` and `edm.{entity}.quarantine`, both on 7-day delete retention
+6. **EDM sink** upserts each entity topic into `edm.{entity}` in the Target database and deletes the row on a tombstone
+7. **Quarantine sink** appends each quarantine topic to `quarantine.{entity}`, keyed on Kafka topic, partition and offset
 
 ## 🗄️ Database Schema
 
-### Products Table
+Every region schema has the same four tables:
+
 ```sql
-CREATE TABLE products (
+CREATE TABLE {region}.products (
     id SERIAL PRIMARY KEY,
     name VARCHAR(255) NOT NULL,
     category VARCHAR(100),
@@ -102,20 +291,44 @@ CREATE TABLE products (
     stock_quantity INTEGER,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
-```
 
-### Sales Table
-```sql
-CREATE TABLE sales (
+CREATE TABLE {region}.users (
+    id SERIAL PRIMARY KEY,
+    first_name VARCHAR(255) NOT NULL,
+    last_name VARCHAR(255) NOT NULL,
+    email VARCHAR(255) NOT NULL,
+    phone_number VARCHAR(20),
+    address_line_one VARCHAR(255),
+    address_line_two VARCHAR(255),
+    city VARCHAR(100),
+    state VARCHAR(100),
+    postal_code VARCHAR(20),
+    country VARCHAR(100),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE {region}.orders (
+    id SERIAL PRIMARY KEY,
+    user_id INTEGER,
+    order_status VARCHAR(50),
+    promo_code VARCHAR(50),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE {region}.line_items (
     id SERIAL PRIMARY KEY,
     product_id INTEGER,
-    customer_name VARCHAR(255),
-    customer_email VARCHAR(255),
+    order_id INTEGER,
     quantity INTEGER,
-    total_amount NUMERIC(10, 2),
-    sale_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    line_item_discount NUMERIC(10, 2),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 ```
+
+All tables use `REPLICA IDENTITY FULL`, so updates and deletes carry the before image.
 
 ## 🔧 Configuration
 
@@ -124,27 +337,35 @@ CREATE TABLE sales (
 Edit `debezium-connector.json` to customize:
 - **Tables to capture**: `table.include.list`
 - **Topic prefix**: `topic.prefix`
-- **Transformations**: `transforms.*` settings
 - **Serialization**: Key/value converter settings
 
 Key configuration highlights:
 ```json
 {
-  "table.include.list": "public.products,public.sales",
+  "topic.prefix": "cdc",
+  "table.include.list": "au\\.(products|users|orders|line_items),uk\\.(...),us\\.(...)",
   "plugin.name": "pgoutput",
-  "transforms": "unwrap",
-  "transforms.unwrap.type": "io.debezium.transforms.ExtractNewRecordState"
+  "decimal.handling.mode": "precise"
 }
 ```
 
+There is no `ExtractNewRecordState` unwrap. The regional topics keep the full Debezium envelope, like a Raw layer, and the Streams app does the unwrap.
+
 ### Environment Variables
 
-**Data Generator** (`app/`):
+**Data Generator** (`app_multi_region/`):
 - `DB_HOST`: PostgreSQL hostname (default: `postgres-source`)
 - `DB_PORT`: PostgreSQL port (default: `5432`)
 - `DB_NAME`: Database name (default: `sourcedb`)
 - `DB_USER`: Database user (default: `postgres`)
 - `DB_PASSWORD`: Database password (default: `postgres`)
+- `GENERATOR_RUN_ID`: Compose run identity, default `local-demo`. Use a new identity for another run.
+- `GENERATOR_WORKERS`: Compose worker count, default `1`.
+
+Workload controls are stored by `setup`, including `--bad-data-rate` and `--operation-mix`. The old `BAD_DATA_RATE` and `DELETE_RATE` environment controls no longer apply.
+
+**Streams app** (`streams/`):
+- `BOOTSTRAP_SERVERS`, `SCHEMA_REGISTRY_URL`, `APPLICATION_ID`, `CONFIG_DIR`
 
 **Kafka Network**:
 - Host access: `localhost:9092`
@@ -164,17 +385,27 @@ The project uses a custom Kafka Connect image with:
 docker compose build kafka-connect
 ```
 
-### Running the Data Generator Locally
+### Running the data generator locally
+
+The generator runs a bounded workload against AU, UK, and US schemas. Setup is
+separate from generation, and a completed run never starts again under the same
+run ID. See [generator commands and checks](app_multi_region/README.md).
 
 ```bash
-cd app/
-
-# Install dependencies with UV
-uv sync
-
-# Run locally (requires PostgreSQL running)
-uv run python main.py
+docker stop data-generator
+cd app_multi_region
+uv sync --frozen
+export DB_HOST=localhost
+uv run python main.py setup --run-id local-001 --workers 3
+uv run python main.py run --run-id local-001
+uv run python main.py report --run-id local-001
 ```
+
+Compose uses the normal fifteen-minute profile and `restart: "no"`. For another
+run, set `GENERATOR_RUN_ID` to a new value and recreate the generator container.
+Pausing workers consumes their scheduled time slots. The EDM verifier's pause
+and resume is therefore suitable for manual correctness checks, not measured
+workloads. Resetting the demo does not reset generator run identities.
 
 ## 📝 Common Operations
 
@@ -289,7 +520,7 @@ curl -X POST http://localhost:8083/connectors/debezium-postgres-source/restart
 curl http://localhost:8081/subjects | jq '.'
 
 # Get specific schema
-curl http://localhost:8081/subjects/cdc.public.products-value/versions/latest | jq '.'
+curl http://localhost:8081/subjects/edm.order-value/versions/latest | jq '.'
 ```
 
 ## 🐛 Troubleshooting
@@ -354,25 +585,37 @@ docker compose logs schema-registry
 
 ```
 .
-├── app/                          # Python data generator
-│   ├── main.py                   # Faker-based data insertion
-│   ├── logger.py                 # Centralized logging utility
-│   ├── pyproject.toml            # UV dependencies
-│   └── Dockerfile                # UV-based container build
-├── connect/                      # Custom Kafka Connect image
-│   ├── Dockerfile                # Multi-stage build
-│   └── build.gradle              # JDBC driver management
-├── scripts/                      # Utility scripts
-│   ├── create-connector.sh       # Create Debezium connector
-│   ├── update-connector.sh       # Update connector config
-│   ├── reset-demo.sh             # Reset entire environment
-│   └── add-tables.sh             # Add tables with incremental snapshot
+├── app_multi_region/               # Python data generator (AU, UK, US regions)
+│   ├── main.py                     # Faker-based inserts, status updates, deletes, bad rows
+│   ├── logger.py                   # Centralized logging utility
+│   ├── pyproject.toml              # UV dependencies
+│   └── Dockerfile                  # UV-based container build
+├── streams/                        # Kafka Streams region integration app
+│   ├── config/regions.yaml         # Region registry
+│   ├── config/entities/*.yaml      # One spec per entity: columns, types, expectations
+│   ├── src/                        # Topology, transformer, tests
+│   └── README.md                   # How the integration works
+├── connect/                        # Custom Kafka Connect image
+│   ├── Dockerfile                  # Multi-stage build
+│   └── build.gradle                # JDBC driver management
+├── scripts/                        # Utility scripts
+│   ├── create-integrated-topics.sh # Create cdc.* and edm.* topics
+│   ├── create-connector.sh         # Create Debezium connector
+│   ├── update-connector.sh         # Update connector config
+│   ├── create-target-schemas.sh    # Create edm and quarantine schemas in targetdb
+│   ├── create-sink-connectors.sh   # Create or update the sink connectors
+│   ├── verify-edm-store.sh         # Reconcile the EDM store and run the end-to-end checks
+│   ├── reset-demo.sh               # Reset entire environment
+│   └── add-tables.sh               # Add tables with incremental snapshot
+├── docs/adr/                       # Architecture decision records
 ├── .github/
-│   └── copilot-instructions.md   # AI coding agent guidance
-├── debezium-connector.json       # CDC connector configuration
-├── example-connector-cfg.json    # Databricks sink reference
-├── ADDING_TABLES.md              # Guide for incremental snapshots
-└── docker-compose.yml            # Full infrastructure definition
+│   └── copilot-instructions.md     # AI coding agent guidance
+├── CONTEXT.md                      # Domain glossary
+├── debezium-connector.json         # CDC connector configuration
+├── edm-sink-connector.json         # EDM sink connector configuration
+├── quarantine-sink-connector.json  # Quarantine sink connector configuration
+├── ADDING_TABLES.md                # Guide for incremental snapshots
+└── docker-compose.yml              # Full infrastructure definition
 ```
 
 ## 🔗 Access URLs

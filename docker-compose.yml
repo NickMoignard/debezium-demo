@@ -56,6 +56,9 @@ services:
       KAFKA_LOG_DIRS: /var/lib/kafka/data
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      # Exactly-once in the Streams app needs a transaction log; the defaults (RF 3, ISR 2) can't be met by one broker
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
       KAFKA_LOG_RETENTION_HOURS: 168
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
       CLUSTER_ID: "Mk3OEYBSD34fcwNTJENDM2Qk"
@@ -79,6 +82,9 @@ services:
 
   # Kafka Connect
   kafka-connect:
+    build:
+      context: ./connect
+      dockerfile: Dockerfile
     image: custom-kafka-connect:latest
     container_name: kafka-connect
     depends_on:
@@ -133,7 +139,7 @@ services:
   # Python Data Generator
   data-generator:
     build:
-      context: ./app
+      context: ./app_multi_region
       dockerfile: Dockerfile
     container_name: data-generator
     depends_on:
@@ -141,11 +147,33 @@ services:
     networks:
       - default
     environment:
+      GENERATOR_RUN_ID: ${GENERATOR_RUN_ID:-local-demo}
+      GENERATOR_WORKERS: ${GENERATOR_WORKERS:-1}
       DB_HOST: postgres-source
       DB_PORT: 5432
       DB_NAME: sourcedb
       DB_USER: postgres
       DB_PASSWORD: postgres
+    command: ["sh", "-c", "python main.py setup --run-id \"$${GENERATOR_RUN_ID}\" --workers \"$${GENERATOR_WORKERS}\" && python main.py run --run-id \"$${GENERATOR_RUN_ID}\""]
+    restart: "no"
+
+  # Kafka Streams: unions cdc.{au,uk,us}.* into integrated edm.* topics
+  streams-app:
+    build:
+      context: ./streams
+      dockerfile: Dockerfile
+    container_name: streams-app
+    depends_on:
+      - kafka
+      - schema-registry
+    networks:
+      - default
+    environment:
+      BOOTSTRAP_SERVERS: kafka:29092
+      SCHEMA_REGISTRY_URL: http://schema-registry:8081
+      APPLICATION_ID: region-integration
+    volumes:
+      - ./streams/config:/app/config:ro
     restart: unless-stopped
 
 networks:

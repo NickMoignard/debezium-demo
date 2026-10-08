@@ -2,14 +2,12 @@
 FROM gradle:8.11.1-jdk21 AS deps
 WORKDIR /app
 COPY build.gradle gradle.properties ./
-COPY *.jar ./
 RUN gradle prepareConnectDependencies --no-daemon
 
 RUN echo "Dependencies prepared:" && \
     find /app -name "*.jar" -o -name "*.tar.gz" | head -20 && \
     echo "Connect lib:" && ls -la /app/connect-lib/ || echo "No connect-lib found" && \
-    echo "Debezium connectors:" && ls -la /app/debezium-connectors/ || echo "No debezium-connectors found" && \
-    echo "Custom JARs:" && ls -la /app/custom-jars/ || echo "No custom-jars found"
+    echo "Debezium connectors:" && ls -la /app/debezium-connectors/ || echo "No debezium-connectors found"
 
 # Stage 2: Runtime image with Debezium Connect
 FROM quay.io/debezium/connect:3.0 AS runtime
@@ -31,7 +29,6 @@ RUN touch /kafka/config/connect-distributed.properties
 
 # Copy dependencies from the deps stage
 COPY --from=deps /app/connect-lib/* /usr/share/confluent-hub/lib/
-COPY --from=deps /app/custom-jars/* /kafka/connect/debezium-connector-postgres
 
 RUN wget http://client.hub.confluent.io/confluent-hub-client-latest.tar.gz \ 
     && tar -xzf confluent-hub-client-latest.tar.gz -C /usr/share/confluent-hub \
@@ -42,11 +39,11 @@ RUN wget http://client.hub.confluent.io/confluent-hub-client-latest.tar.gz \
 # RUN chmod +x /usr/share/confluent-hub/bin/confluent-hub && \
 #     ln -sf /usr/share/confluent-hub/bin/confluent-hub /usr/local/bin/confluent-hub
 
-# Install Confluent components
+# Install Confluent components. Pinned: 8.x converters need Kafka 4 clients, this worker runs 3.9
 RUN confluent-hub install --no-prompt \
     --component-dir /usr/share/confluent-hub/lib \
     --worker-configs /kafka/config/connect-distributed.properties \
-    confluentinc/kafka-connect-avro-converter:latest
+    confluentinc/kafka-connect-avro-converter:7.8.2
 
 # Install Databricks Delta Lake Connector
 RUN confluent-hub install --no-prompt \

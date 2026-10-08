@@ -1,0 +1,15 @@
+entity: product
+source_table: products
+key: id
+money: true
+columns:
+  - { source: id,             name: product_id,   type: long }
+  - { source: name,           name: product_name, type: string }
+  - { source: category,                           type: string }
+  - { source: price,          name: list_price,   type: money }
+  - { source: stock_quantity,                     type: int }
+  - { source: created_at,                         type: timestamp_utc }
+expectations:
+  - { name: price_present,      kind: not_null, column: list_price,     action: quarantine }
+  - { name: price_non_negative, kind: gte,      column: list_price,     value: 0, action: quarantine }
+  - { name: stock_non_negative, kind: gte,      column: stock_quantity, value: 0, action: warn }
